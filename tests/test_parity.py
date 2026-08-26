@@ -62,6 +62,38 @@ def test_score_reuses_thread_local_scratch(matrices):
     assert _lib._scratch.gaps is gaps
 
 
+def test_striped_threshold_tail_and_scratch_reuse(matrices):
+    upstream, matrix = matrices
+    for name in ("striped_store", "striped_load", "striped_gaps", "striped_profile", "striped_result"):
+        if hasattr(_lib._scratch, name):
+            delattr(_lib._scratch, name)
+    below_query = "ACGT" * 63 + "ACG"
+    below_target = "TGCA" * 64 + "T"
+    assert len(below_query) * len(below_target) == _lib._STRIPED_MIN_CELLS - 1
+    assert triple(mojo.sw(below_query, below_target, 5, 1, matrix)) == triple(
+        parasail.sw(below_query, below_target, 5, 1, upstream)
+    )
+    assert not hasattr(_lib._scratch, "striped_store")
+
+    tail_query = below_query + "T" + "A"
+    tail_target = below_target[:-1]
+    assert len(tail_query) == 257
+    assert triple(mojo.sw(tail_query, tail_target, 5, 1, matrix)) == triple(
+        parasail.sw(tail_query, tail_target, 5, 1, upstream)
+    )
+    arrays = tuple(
+        getattr(_lib._scratch, name)
+        for name in ("striped_store", "striped_load", "striped_gaps", "striped_profile", "striped_result")
+    )
+    assert triple(mojo.sw(tail_query[:-1], below_target, 5, 1, matrix)) == triple(
+        parasail.sw(tail_query[:-1], below_target, 5, 1, upstream)
+    )
+    assert arrays == tuple(
+        getattr(_lib._scratch, name)
+        for name in ("striped_store", "striped_load", "striped_gaps", "striped_profile", "striped_result")
+    )
+
+
 def test_ffi_rejects_strided_or_wrongly_typed_buffers(matrices):
     _, matrix = matrices
     query = np.frombuffer(b"ACGT", dtype=np.uint8)

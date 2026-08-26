@@ -183,7 +183,10 @@ def sw(s1, s2, open: int, extend: int, matrix: Matrix) -> Result:
     query, target = _bytes(s1), _bytes(s2)
     if not query.size or not target.size:
         raise ValueError("sequences must be non-empty")
-    value, end_query, end_ref = _lib.score(query, target, matrix._lookup.ravel(), open, extend)
+    value, end_query, end_ref = _lib.score(
+        query, target, matrix._lookup.ravel(), open, extend,
+        matrix.mapper, matrix.matrix,
+    )
     return Result(value, end_query, end_ref, query=s1, ref=s2, matrix=matrix)
 
 

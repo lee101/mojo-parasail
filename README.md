@@ -28,11 +28,13 @@ Implemented API surface:
 | trace and derived results | `sw_trace`, `sw_stats`, `sw_table`, `sw_rowcol`, including backend/width aliases |
 | profiles | `Profile`, `profile_create`, and width suffix aliases |
 
-`sw` is the compiled linear-space affine-gap implementation. The trace,
+`sw` is the compiled linear-space affine-gap implementation. It uses a scalar
+kernel for small alignments and a native-width striped SIMD kernel once the
+matrix reaches 65,536 cells. The trace,
 table, row/column, and statistic APIs use a NumPy full matrix because their
 requested result or traceback requires full-matrix state. Width and backend
-names are compatibility aliases; they do not select upstream's distinct SIMD
-algorithms or saturating-overflow behaviour.
+names are compatibility aliases; they do not select different integer widths
+or saturating-overflow behaviour.
 
 Not yet covered: global/semi-global (`nw`, `sg`) alignment, built-in biological
 matrices such as `blosum62`, PSSMs, scan/striped profile-only calling forms,
@@ -67,19 +69,26 @@ allocates its reusable scratch columns before timing.
 
 | case | mojo-parasail | parasail | ratio | result |
 | --- | ---: | ---: | ---: | --- |
-| SW score (500 x 500) | 1.29 ms | 0.87 ms | 0.68x | slower |
-| SW score (2000 x 2000) | 20.59 ms | 13.96 ms | 0.68x | slower |
+| SW score (500 x 500) | 0.84 ms | 0.87 ms | 1.04x | faster |
+| SW score (2000 x 2000) | 12.24 ms | 14.42 ms | 1.18x | faster |
 
-The score path reuses its thread-local, zero-copy NumPy work columns and uses
-native-width SIMD with a scalar remainder for their independent initialization.
-The affine recurrence itself has a loop-carried horizontal gap state, so this
-linear-space layout cannot safely vectorize or parallelize the cell loop.
-Parasail's mature C striped/scan kernels exploit a different SIMD formulation,
-and remains faster.
+The large score path builds a compact striped query profile in reusable
+thread-local scratch, evaluates native-width SIMD vectors, and applies a lazy
+horizontal-gap correction. Padded SIMD lanes are excluded from endpoint
+selection. Smaller matrices stay on the scalar kernel to avoid profile setup
+overhead. Both paths keep sequence and matrix NumPy buffers zero-copy across
+the FFI boundary, and all scratch allocations are reused.
 
-GPU execution is intentionally not implemented. Each cell performs only a few
-integer operations per several working-column loads and stores, well below the
-arithmetic intensity at which transfer and launch overhead can pay off.
+CPU threading is intentionally not used. A single alignment's row, column, and
+lazy-gap updates are dependency-linked; synchronizing wavefronts would add
+overhead to the input sizes served by this API. There is no independent batch
+dimension to parallelize.
+
+GPU execution is intentionally not implemented. Each striped cell performs
+only a handful of integer operations while loading and storing several score
+vectors, comfortably below one operation per byte and therefore well below the
+roughly two-operations-per-byte threshold at which transfer and launch overhead
+could pay off.
 
 ## How it works
 
@@ -90,15 +99,15 @@ ctypes: byte and signed-integer NumPy buffer addresses
        |
 src/capi.mojo: exported C ABI wrapper
        |
-Mojo affine-gap recurrence: H and E columns, scalar F state
+Mojo affine-gap recurrence: scalar or striped SIMD with lazy F correction
 ```
 
 The ctypes boundary passes contiguous NumPy buffers as integer addresses, as
 required by Mojo's non-parametric C export rules. Mojo reconstructs mutable
-pointers, performs no allocation, and writes its two O(n) work columns into
-Python-owned memory. The substitution matrix is expanded once to a contiguous
-signed-integer byte lookup table, making each recurrence cell a pair
-of sequential working-column accesses and one direct substitution lookup.
+pointers and performs no allocation. The scalar kernel uses two O(n) columns
+and a direct byte-pair lookup. The striped kernel uses three O(m) score vectors
+plus an O(alphabet × m) query profile. All of that storage is Python-owned,
+thread-local, and retained for later calls.
 
 ## License
 
